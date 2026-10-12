@@ -1,0 +1,23 @@
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:16389:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 1s
+      retries: 20
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_PASSWORD: baqueue_test
+      POSTGRES_DB: baqueue_test
+    ports:
+      - "127.0.0.1:15489:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d baqueue_test"]
+      interval: 2s
+      timeout: 1s
+      retries: 20

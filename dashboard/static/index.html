@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BaQueue Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="./style.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <script src="./app.js"></script>
+</head>
+<body x-data="dashboard">
+
+    <!-- Mobile Sidebar Backdrop -->
+    <div class="sidebar-backdrop" :class="{ visible: sidebarMobileOpen }" @click="sidebarMobileOpen = false"></div>
+
+    <!-- Sidebar -->
+    <aside class="sidebar" :class="{ collapsed: sidebarCollapsed, 'mobile-open': sidebarMobileOpen }">
+        <div class="sidebar-brand">
+            <div class="brand-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+            </div>
+            <span class="brand-text nav-label">BaQueue</span>
+        </div>
+
+        <nav class="sidebar-nav">
+            <button class="nav-item" :class="{ active: tab === 'overview' }" @click="switchTab('overview')">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+                <span class="nav-label">Overview</span>
+            </button>
+            <button class="nav-item" :class="{ active: tab === 'jobs' }" @click="switchTab('jobs')">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+                <span class="nav-label">Jobs</span>
+            </button>
+            <button class="nav-item" :class="{ active: tab === 'queues' }" @click="switchTab('queues')">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+                <span class="nav-label">Queues</span>
+            </button>
+            <button class="nav-item" :class="{ active: tab === 'workers' }" @click="switchTab('workers')">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+                <span class="nav-label">Workers</span>
+            </button>
+        </nav>
+
+        <div class="sidebar-footer">
+            <button class="nav-item" @click="sidebarCollapsed = !sidebarCollapsed">
+                <svg class="collapse-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" :style="sidebarCollapsed ? 'transform:rotate(180deg)' : ''"><polyline points="15 18 9 12 15 6"/></svg>
+                <span class="nav-label">Collapse</span>
+            </button>
+        </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="main-content" :class="{ expanded: sidebarCollapsed }">
+        <!-- Top Bar -->
+        <header class="topbar">
+            <div class="topbar-left">
+                <button class="menu-toggle" @click="sidebarMobileOpen = !sidebarMobileOpen" aria-label="Toggle menu">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+                </button>
+                <h1 class="page-title" x-text="pageTitle"></h1>
+                <div class="connection-badge" :class="connected ? 'online' : 'offline'">
+                    <span class="conn-dot"></span>
+                    <span x-text="connected ? 'Live' : 'Offline'"></span>
+                </div>
+            </div>
+            <div class="topbar-right">
+                <div class="date-filter-group">
+                    <label>From</label>
+                    <input type="datetime-local" class="date-input" x-model="dateFrom" @change="onDateFilterChange()">
+                    <label>To</label>
+                    <input type="datetime-local" class="date-input" x-model="dateTo" @change="onDateFilterChange()">
+                    <button class="btn-icon" @click="clearDateFilter()" title="Clear date filter" x-show="dateFrom || dateTo">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                    </button>
+                    <button class="btn-preset" @click="setPreset('1h')">1h</button>
+                    <button class="btn-preset" @click="setPreset('24h')">24h</button>
+                    <button class="btn-preset" @click="setPreset('7d')">7d</button>
+                    <button class="btn-preset" @click="setPreset('30d')">30d</button>
+                </div>
+                <button class="theme-btn" @click="toggleTheme">
+                    <svg x-show="theme === 'dark'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
+                    <svg x-show="theme !== 'dark'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>
+                </button>
+            </div>
+        </header>
+
+        <div class="content-area">
+            <!-- ═══════════════ OVERVIEW ═══════════════ -->
+            <div x-show="tab === 'overview'" x-transition.opacity>
+                <!-- Stat Cards -->
+                <div class="metric-cards">
+                    <div class="metric-card">
+                        <div class="metric-header">
+                            <span class="metric-label">Total Jobs</span>
+                            <div class="metric-icon total">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+                            </div>
+                        </div>
+                        <div class="metric-value" x-text="formatNumber(totals.total || 0)"></div>
+                        <div class="metric-sub" x-text="totals.queues + ' queue(s) active'"></div>
+                    </div>
+                    <div class="metric-card accent-blue">
+                        <div class="metric-header">
+                            <span class="metric-label">Pending</span>
+                            <div class="metric-icon pending">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                            </div>
+                        </div>
+                        <div class="metric-value" x-text="formatNumber(totals.pending)"></div>
+                        <div class="metric-sub" x-text="'+' + formatNumber(rates.pending_per_min || 0) + ' / min'"></div>
+                        <div class="metric-bar"><div class="metric-bar-fill pending" :style="'width:' + pctOf(totals.pending, totals.total)"></div></div>
+                    </div>
+                    <div class="metric-card accent-purple">
+                        <div class="metric-header">
+                            <span class="metric-label">Processing</span>
+                            <div class="metric-icon processing">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+                            </div>
+                        </div>
+                        <div class="metric-value" x-text="formatNumber(totals.processing)"></div>
+                        <div class="metric-sub" x-text="'+' + formatNumber(rates.processing_per_min || 0) + ' / min'"></div>
+                        <div class="metric-bar"><div class="metric-bar-fill processing" :style="'width:' + pctOf(totals.processing, totals.total)"></div></div>
+                    </div>
+                    <div class="metric-card accent-green">
+                        <div class="metric-header">
+                            <span class="metric-label">Completed</span>
+                            <div class="metric-icon completed">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                            </div>
+                        </div>
+                        <div class="metric-value" x-text="formatNumber(totals.completed)"></div>
+                        <div class="metric-sub" x-text="'+' + formatNumber(rates.completed_per_min || 0) + ' / min'"></div>
+                        <div class="metric-bar"><div class="metric-bar-fill completed" :style="'width:' + pctOf(totals.completed, totals.total)"></div></div>
+                    </div>
+                    <div class="metric-card accent-red">
+                        <div class="metric-header">
+                            <span class="metric-label">Failed</span>
+                            <div class="metric-icon failed">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+                            </div>
+                        </div>
+                        <div class="metric-value" x-text="formatNumber(totals.failed)"></div>
+                        <div class="metric-sub" x-text="'+' + formatNumber(rates.failed_per_min || 0) + ' / min'"></div>
+                        <div class="metric-bar"><div class="metric-bar-fill failed" :style="'width:' + pctOf(totals.failed, totals.total)"></div></div>
+                    </div>
+                </div>
+
+                <!-- Queue Breakdown -->
+                <div class="panel">
+                    <div class="panel-header">
+                        <h2>Queue Breakdown</h2>
+                        <span class="panel-badge" x-text="queues.length + ' queues'"></span>
+                    </div>
+                    <div class="panel-body">
+                        <template x-if="queues.length === 0">
+                            <div class="empty-state">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="empty-icon"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v2"/></svg>
+                                <p>No queues found</p>
+                                <span>Push some jobs to get started</span>
+                            </div>
+                        </template>
+                        <template x-for="q in queues" :key="q.name">
+                            <div class="queue-row">
+                                <div class="queue-info">
+                                    <span class="queue-name" x-text="q.name"></span>
+                                    <span class="queue-total" x-text="queueTotal(q) + ' total'"></span>
+                                </div>
+                                <div class="queue-bars">
+                                    <div class="queue-bar-track">
+                                        <div class="queue-bar-seg completed" :style="'width:' + queuePct(q, 'completed')"></div>
+                                        <div class="queue-bar-seg processing" :style="'width:' + queuePct(q, 'processing')"></div>
+                                        <div class="queue-bar-seg pending" :style="'width:' + queuePct(q, 'pending')"></div>
+                                        <div class="queue-bar-seg failed" :style="'width:' + queuePct(q, 'failed')"></div>
+                                    </div>
+                                </div>
+                                <div class="queue-stats">
+                                    <span class="qs-item pending"><span class="qs-dot pending"></span><span x-text="q.pending"></span></span>
+                                    <span class="qs-item processing"><span class="qs-dot processing"></span><span x-text="q.processing"></span></span>
+                                    <span class="qs-item completed"><span class="qs-dot completed"></span><span x-text="q.completed"></span></span>
+                                    <span class="qs-item failed"><span class="qs-dot failed"></span><span x-text="q.failed"></span></span>
+                                </div>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+
+                <!-- Recent Jobs -->
+                <div class="panel">
+                    <div class="panel-header">
+                        <h2>Recent Activity</h2>
+                        <button class="btn-sm" @click="switchTab('jobs')">View All</button>
+                    </div>
+                    <div class="panel-body no-pad">
+                        <template x-if="recentJobs.length === 0">
+                            <div class="empty-state small">
+                                <p>No recent activity</p>
+                            </div>
+                        </template>
+                        <div class="activity-list">
+                            <template x-for="job in recentJobs" :key="job.id">
+                                <div class="activity-item" @click="viewJob(job.id)">
+                                    <div class="activity-status" :class="job.status"></div>
+                                    <div class="activity-info">
+                                        <div class="activity-title">
+                                            <span class="activity-class" x-text="shortClass(job.job_class)"></span>
+                                            <span class="activity-queue" x-text="job.queue"></span>
+                                            <span class="scheduled-badge tooltip-host"
+                                                  x-show="isScheduled(job)"
+                                                  :data-tooltip="'Scheduled: ' + formatTimeFull(job.delay_until)">
+                                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                                                <span x-text="scheduledIn(job.delay_until)"></span>
+                                            </span>
+                                        </div>
+                                        <div class="activity-meta">
+                                            <span class="mono" x-text="shortId(job.id)"></span>
+                                            <span x-text="'Attempt ' + job.attempts + '/' + job.max_attempts"></span>
+                                        </div>
+                                    </div>
+                                    <div class="activity-time" x-text="timeAgo(job.updated_at || job.created_at)"></div>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ═══════════════ JOBS ═══════════════ -->
+            <div x-show="tab === 'jobs'" x-transition.opacity>
+                <div class="panel">
+                    <div class="panel-header">
+                        <h2>All Jobs</h2>
+                        <div class="filter-bar">
+                            <div class="filter-group">
+                                <select class="filter-select" x-model="jobsFilter.status" @change="jobsPage=1; fetchJobs()">
+                                    <option value="">All Status</option>
+                                    <option value="pending">Pending</option>
+                                    <option value="processing">Processing</option>
+                                    <option value="completed">Completed</option>
+                                    <option value="failed">Failed</option>
+                                </select>
+                                <select class="filter-select" x-model="jobsFilter.queue" @change="jobsPage=1; fetchJobs()">
+                                    <option value="">All Queues</option>
+                                    <template x-for="q in queues" :key="q.name">
+                                        <option :value="q.name" x-text="q.name"></option>
+                                    </template>
+                                </select>
+                                <input class="filter-input" type="text" placeholder="Tag..." x-model="jobsFilter.tag" @input.debounce.300ms="jobsPage=1; fetchJobs()">
+                            </div>
+                            <div class="jobs-count">
+                                <button class="btn-bulk-retry"
+                                        x-show="jobsFilter.status === 'failed' && jobsTotal > 0"
+                                        @click="retryAllFailed()"
+                                        title="Retry all failed jobs matching current filters">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg>
+                                    Retry All (<span x-text="jobsTotal"></span>)
+                                </button>
+                                <span class="live-indicator" :class="{ on: jobsWSConnected }" x-show="jobsWSConnected" title="Live updates via WebSocket">
+                                    <span class="live-dot"></span>LIVE
+                                </span>
+                                <span x-show="jobsTotal > 0" x-text="jobsTotal + ' job(s) found'"></span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="panel-body no-pad">
+                        <template x-if="jobs.length === 0">
+                            <div class="empty-state">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="empty-icon"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                                <p>No jobs match the current filters</p>
+                            </div>
+                        </template>
+                        <table x-show="jobs.length > 0" class="jobs-table">
+                            <thead>
+                                <tr>
+                                    <th>Status</th>
+                                    <th>Job ID</th>
+                                    <th>Job Class</th>
+                                    <th>Queue</th>
+                                    <th>Attempts</th>
+                                    <th>Created</th>
+                                    <th>Duration</th>
+                                    <th></th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <template x-for="job in jobs" :key="job.id">
+                                    <tr @click="viewJob(job.id)"
+                                        class="clickable-row"
+                                        :class="{ 'row-enter': job._entered, 'row-flash': job._flash }">
+                                        <td>
+                                            <div class="status-cell">
+                                                <span class="status-pill" :class="job.status">
+                                                    <span class="status-dot-sm"></span>
+                                                    <span x-text="job.status"></span>
+                                                </span>
+                                                <span class="scheduled-badge tooltip-host"
+                                                      x-show="isScheduled(job)"
+                                                      :data-tooltip="'Scheduled: ' + formatTimeFull(job.delay_until)">
+                                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                                                    <span x-text="scheduledIn(job.delay_until)"></span>
+                                                </span>
+                                            </div>
+                                        </td>
+                                        <td class="mono cell-id" x-text="shortId(job.id)"></td>
+                                        <td class="cell-class" x-text="shortClass(job.job_class)"></td>
+                                        <td><span class="queue-pill" x-text="job.queue"></span></td>
+                                        <td class="cell-attempts">
+                                            <span x-text="job.attempts + '/' + job.max_attempts"></span>
+                                            <div class="attempt-bar">
+                                                <div class="attempt-fill"
+                                                     :class="{ over: job.attempts > job.max_attempts }"
+                                                     :style="'width:' + Math.min(job.attempts / job.max_attempts * 100, 100) + '%'"></div>
+                                            </div>
+                                        </td>
+                                        <td class="cell-time" x-text="formatTime(job.created_at)"></td>
+                                        <td class="cell-time cell-duration" x-text="jobDuration(job)"></td>
+                                        <td>
+                                            <button class="btn-action" @click.stop="viewJob(job.id)">
+                                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><polyline points="9 18 15 12 9 6"/></svg>
+                                            </button>
+                                        </td>
+                                    </tr>
+                                </template>
+                            </tbody>
+                        </table>
+                    </div>
+                    <!-- Pagination -->
+                    <div class="panel-footer" x-show="jobs.length > 0">
+                        <span class="page-info" x-text="'Page ' + jobsPage + ' of ' + Math.ceil(jobsTotal / 25)"></span>
+                        <div class="page-btns">
+                            <button class="btn-page" @click="prevPage()" :disabled="jobsPage <= 1">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><polyline points="15 18 9 12 15 6"/></svg>
+                                Prev
+                            </button>
+                            <button class="btn-page" @click="nextPage()" :disabled="jobsPage >= Math.ceil(jobsTotal / 25)">
+                                Next
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><polyline points="9 18 15 12 9 6"/></svg>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ═══════════════ QUEUES ═══════════════ -->
+            <div x-show="tab === 'queues'" x-transition.opacity>
+                <template x-if="queues.length === 0">
+                    <div class="panel">
+                        <div class="empty-state">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="empty-icon"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v2"/></svg>
+                            <p>No queues found</p>
+                        </div>
+                    </div>
+                </template>
+                <div class="queue-cards">
+                    <template x-for="q in queues" :key="q.name">
+                        <div class="queue-card" @click="jobsFilter.queue = q.name; switchTab('jobs')">
+                            <div class="qc-header">
+                                <h3 x-text="q.name"></h3>
+                                <span class="qc-total" x-text="queueTotal(q)"></span>
+                            </div>
+                            <div class="qc-bar-track">
+                                <div class="queue-bar-seg completed" :style="'width:' + queuePct(q, 'completed')"></div>
+                                <div class="queue-bar-seg processing" :style="'width:' + queuePct(q, 'processing')"></div>
+                                <div class="queue-bar-seg pending" :style="'width:' + queuePct(q, 'pending')"></div>
+                                <div class="queue-bar-seg failed" :style="'width:' + queuePct(q, 'failed')"></div>
+                            </div>
+                            <div class="qc-stats">
+                                <div class="qc-stat">
+                                    <span class="qc-stat-val pending" x-text="q.pending"></span>
+                                    <span class="qc-stat-lbl">Pending</span>
+                                    <span class="qc-stat-rate" x-text="'+' + ((q.rates && q.rates.pending_per_min) || 0) + '/m'"></span>
+                                </div>
+                                <div class="qc-stat">
+                                    <span class="qc-stat-val processing" x-text="q.processing"></span>
+                                    <span class="qc-stat-lbl">Processing</span>
+                                    <span class="qc-stat-rate" x-text="'+' + ((q.rates && q.rates.processing_per_min) || 0) + '/m'"></span>
+                                </div>
+                                <div class="qc-stat">
+                                    <span class="qc-stat-val completed" x-text="q.completed"></span>
+                                    <span class="qc-stat-lbl">Completed</span>
+                                    <span class="qc-stat-rate" x-text="'+' + ((q.rates && q.rates.completed_per_min) || 0) + '/m'"></span>
+                                </div>
+                                <div class="qc-stat">
+                                    <span class="qc-stat-val failed" x-text="q.failed"></span>
+                                    <span class="qc-stat-lbl">Failed</span>
+                                    <span class="qc-stat-rate" x-text="'+' + ((q.rates && q.rates.failed_per_min) || 0) + '/m'"></span>
+                                </div>
+                            </div>
+                        </div>
+                    </template>
+                </div>
+            </div>
+
+            <!-- ═══════════════ WORKERS ═══════════════ -->
+            <div x-show="tab === 'workers'" x-transition.opacity>
+                <template x-if="supervisors.length === 0">
+                    <div class="panel">
+                        <div class="empty-state">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="empty-icon"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+                            <p>No active supervisors</p>
+                            <span>Start a worker process to see stats here</span>
+                        </div>
+                    </div>
+                </template>
+                <template x-for="sup in supervisors" :key="sup.name">
+                    <div class="panel">
+                        <div class="panel-header">
+                            <div>
+                                <h2 x-text="sup.name"></h2>
+                                <span class="panel-badge" :class="sup.running ? 'green' : 'red'" x-text="sup.running ? 'Running' : 'Stopped'"></span>
+                            </div>
+                            <span class="text-muted" x-text="sup.workers + ' worker(s)'"></span>
+                        </div>
+                        <div class="workers-grid">
+                            <template x-for="w in (sup.worker_stats || [])" :key="w.name">
+                                <div class="worker-tile" :class="{ active: w.running }">
+                                    <div class="wt-header">
+                                        <span class="wt-name" x-text="w.name"></span>
+                                        <span class="wt-status" :class="w.running ? 'running' : 'idle'" x-text="w.running ? 'Active' : 'Idle'"></span>
+                                    </div>
+                                    <div class="wt-stats">
+                                        <div class="wt-stat">
+                                            <span class="wt-stat-val" x-text="w.jobs_processed"></span>
+                                            <span class="wt-stat-lbl">Processed</span>
+                                        </div>
+                                        <div class="wt-stat">
+                                            <span class="wt-stat-val failed" x-text="w.jobs_failed"></span>
+                                            <span class="wt-stat-lbl">Failed</span>
+                                        </div>
+                                    </div>
+                                    <div class="wt-current" x-show="w.current_job">
+                                        <span class="wt-current-label">Processing:</span>
+                                        <span class="mono" x-text="shortId(w.current_job || '')"></span>
+                                    </div>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+                </template>
+            </div>
+        </div>
+    </main>
+
+    <!-- ═══════════════ JOB DETAIL MODAL ═══════════════ -->
+    <template x-if="selectedJob">
+        <div class="modal-overlay" @click.self="closeModal()" x-transition.opacity>
+            <div class="modal-panel" @click.stop>
+                <div class="modal-top">
+                    <div>
+                        <h2>Job Details</h2>
+                        <span class="mono text-muted" x-text="selectedJob.id"></span>
+                    </div>
+                    <button class="btn-icon" @click="closeModal()">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                    </button>
+                </div>
+
+                <div class="modal-content">
+                    <div class="detail-grid">
+                        <div class="detail-card">
+                            <span class="dc-label">Status</span>
+                            <span class="status-pill lg" :class="selectedJob.status">
+                                <span class="status-dot-sm"></span>
+                                <span x-text="selectedJob.status"></span>
+                            </span>
+                        </div>
+                        <div class="detail-card">
+                            <span class="dc-label">Queue</span>
+                            <span class="queue-pill lg" x-text="selectedJob.queue"></span>
+                        </div>
+                        <div class="detail-card">
+                            <span class="dc-label">Attempts</span>
+                            <span class="dc-value" x-text="selectedJob.attempts + ' / ' + selectedJob.max_attempts"></span>
+                        </div>
+                        <div class="detail-card">
+                            <span class="dc-label">Backoff</span>
+                            <span class="dc-value" x-text="JSON.stringify(selectedJob.backoff)"></span>
+                        </div>
+                        <div class="detail-card" x-show="selectedJob.delay_until" style="grid-column: 1 / -1;">
+                            <span class="dc-label">Scheduled For</span>
+                            <div class="dc-scheduled">
+                                <span class="scheduled-badge">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                                    <span x-text="scheduledIn(selectedJob.delay_until)"></span>
+                                </span>
+                                <span class="dc-value" x-text="formatTimeFull(selectedJob.delay_until)"></span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="detail-section">
+                        <h4>Job Class</h4>
+                        <code class="code-block" x-text="selectedJob.job_class"></code>
+                    </div>
+
+                    <div class="detail-section">
+                        <h4>Timeline</h4>
+                        <div class="timeline">
+                            <div class="tl-item">
+                                <div class="tl-dot created"></div>
+                                <div class="tl-content">
+                                    <span class="tl-label">Created</span>
+                                    <span class="tl-time" x-text="formatTimeFull(selectedJob.created_at)"></span>
+                                </div>
+                            </div>
+                            <div class="tl-item" x-show="selectedJob.delay_until">
+                                <div class="tl-dot scheduled"></div>
+                                <div class="tl-content">
+                                    <span class="tl-label">Scheduled For</span>
+                                    <span class="tl-time" x-text="formatTimeFull(selectedJob.delay_until)"></span>
+                                </div>
+                            </div>
+                            <!-- Per-attempt history (jobs that ran at least once on a
+                                 driver that persists history). Each backoff retry is its
+                                 own entry. -->
+                            <template x-for="(entry, idx) in attemptHistory(selectedJob)" :key="idx">
+                                <div class="tl-item">
+                                    <div class="tl-dot" :class="attemptDotClass(entry)"></div>
+                                    <div class="tl-content">
+                                        <span class="tl-label">
+                                            Attempt <span x-text="entry.attempt"></span> &middot;
+                                            <span x-text="entry.status"></span>
+                                            <span class="tl-dur" x-show="attemptDuration(entry)" x-text="'(' + attemptDuration(entry) + ')'"></span>
+                                        </span>
+                                        <span class="tl-time" x-text="formatTimeFull(entry.started_at) + (entry.finished_at ? ' → ' + formatTimeFull(entry.finished_at) : '')"></span>
+                                        <span class="tl-retry" x-show="entry.will_retry">
+                                            Retry scheduled <span x-text="entry.next_retry_at ? scheduledIn(entry.next_retry_at) : ''"></span>
+                                        </span>
+                                        <pre class="tl-error" x-show="entry.error" x-text="entry.error"></pre>
+                                    </div>
+                                </div>
+                            </template>
+                            <!-- The currently-running attempt is not recorded in history
+                                 until it concludes, so surface it live. -->
+                            <template x-if="inFlightAttempt(selectedJob)">
+                                <div class="tl-item">
+                                    <div class="tl-dot processing"></div>
+                                    <div class="tl-content">
+                                        <span class="tl-label">Attempt <span x-text="selectedJob.attempts"></span> &middot; running&hellip;</span>
+                                        <span class="tl-time" x-text="formatTimeFull(selectedJob.started_at)"></span>
+                                    </div>
+                                </div>
+                            </template>
+
+                            <!-- Legacy single-attempt timeline: jobs created before history
+                                 tracking, or on drivers that don't persist history. -->
+                            <template x-if="!hasHistory(selectedJob) && !inFlightAttempt(selectedJob) && selectedJob.started_at">
+                                <div class="tl-item">
+                                    <div class="tl-dot processing"></div>
+                                    <div class="tl-content">
+                                        <span class="tl-label">Started</span>
+                                        <span class="tl-time" x-text="formatTimeFull(selectedJob.started_at)"></span>
+                                    </div>
+                                </div>
+                            </template>
+                            <template x-if="!hasHistory(selectedJob) && selectedJob.completed_at">
+                                <div class="tl-item">
+                                    <div class="tl-dot completed"></div>
+                                    <div class="tl-content">
+                                        <span class="tl-label">Completed</span>
+                                        <span class="tl-time" x-text="formatTimeFull(selectedJob.completed_at)"></span>
+                                    </div>
+                                </div>
+                            </template>
+                            <template x-if="!hasHistory(selectedJob) && selectedJob.failed_at">
+                                <div class="tl-item">
+                                    <div class="tl-dot failed"></div>
+                                    <div class="tl-content">
+                                        <span class="tl-label">Failed</span>
+                                        <span class="tl-time" x-text="formatTimeFull(selectedJob.failed_at)"></span>
+                                    </div>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+
+                    <div class="detail-section" x-show="selectedJob.tags && selectedJob.tags.length">
+                        <h4>Tags</h4>
+                        <div class="tags-list">
+                            <template x-for="t in (selectedJob.tags || [])" :key="t">
+                                <span class="tag-chip" x-text="t"></span>
+                            </template>
+                        </div>
+                    </div>
+
+                    <div class="detail-section" x-show="selectedJob.batch_id">
+                        <h4>Batch ID</h4>
+                        <code class="code-block" x-text="selectedJob.batch_id"></code>
+                    </div>
+
+                    <div class="detail-section">
+                        <h4>Payload Data</h4>
+                        <pre class="code-pre" x-text="JSON.stringify(selectedJob.data, null, 2)"></pre>
+                    </div>
+
+                    <template x-if="selectedJob.error">
+                        <div class="detail-section error-section">
+                            <h4>Error</h4>
+                            <pre class="code-pre error" x-text="selectedJob.error"></pre>
+                        </div>
+                    </template>
+                </div>
+
+                <div class="modal-actions">
+                    <button class="btn-primary" x-show="isScheduled(selectedJob)" @click="executeJob(selectedJob.id)">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                        Execute Now
+                    </button>
+                    <button class="btn-primary" x-show="selectedJob.status === 'failed'" @click="retryJob(selectedJob.id)">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg>
+                        Retry Job
+                    </button>
+                    <button class="btn-danger" @click="deleteJob(selectedJob.id)">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+                        Delete Job
+                    </button>
+                </div>
+            </div>
+        </div>
+    </template>
+
+</body>
+</html>

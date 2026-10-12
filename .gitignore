@@ -1,0 +1,10 @@
+*.exe
+*.test
+*.db
+*.db-shm
+*.db-wal
+coverage.out
+test-results*.json
+*.log
+bin/
+artifacts/

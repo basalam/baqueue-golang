@@ -1,0 +1,21 @@
+{
+  "prefix": "baqueue",
+  "driver": {"name": "sqlite", "url": ".baqueue-go.db"},
+  "supervisors": [{
+    "name": "default",
+    "queues": ["default", "emails"],
+    "balance": "auto",
+    "min_workers": 2,
+    "max_workers": 10,
+    "recover_stuck_jobs": true,
+    "stuck_processing_seconds": 3600
+  }],
+  "schedules": [],
+  "auto_prune": true,
+  "prune_completed_seconds": 5,
+  "prune_other_seconds": 86400,
+  "prune_metrics_seconds": 604800,
+  "auto_cleanup_on_disk_full": true,
+  "dashboard_host": "127.0.0.1",
+  "dashboard_port": 9100
+}

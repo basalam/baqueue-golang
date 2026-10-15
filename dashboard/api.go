@@ -20,6 +20,10 @@ func (s *server) overview(ctx context.Context) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	dynamic, err := s.dynamicQueues(ctx)
+	if err != nil {
+		return nil, err
+	}
 	metrics, err := s.driver.GetMetrics(ctx, "")
 	if err != nil {
 		return nil, err
@@ -41,14 +45,17 @@ func (s *server) overview(ctx context.Context) (any, error) {
 	now := baqueue.Now()
 	from := now - 60
 	totals := map[string]int{"pending": 0, "processing": 0, "completed": 0, "failed": 0, "queues": len(queues), "total": 0}
+	for _, status := range statuses {
+		count, err := s.driver.CountJobs(ctx, baqueue.JobFilter{Status: status})
+		if err != nil {
+			return nil, err
+		}
+		totals[status] = count
+		totals["total"] += count
+	}
 	details := make([]map[string]any, 0, len(queues))
 	for _, queue := range queues {
 		m := counts[queue]
-		queueCounts := map[string]int{"pending": m.Pending, "processing": m.Processing, "completed": m.Completed, "failed": m.Failed}
-		for status, count := range queueCounts {
-			totals[status] += count
-			totals["total"] += count
-		}
 		pending, err := s.driver.CountJobs(ctx, baqueue.JobFilter{Queue: queue, CreatedFrom: &from})
 		if err != nil {
 			return nil, err
@@ -57,7 +64,7 @@ func (s *server) overview(ctx context.Context) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		details = append(details, map[string]any{"name": queue, "pending": m.Pending, "processing": m.Processing, "completed": m.Completed, "failed": m.Failed, "rates": rates(pending, throughput)})
+		details = append(details, map[string]any{"name": queue, "dynamic": dynamic[queue], "pending": m.Pending, "processing": m.Processing, "completed": m.Completed, "failed": m.Failed, "rates": rates(pending, throughput)})
 	}
 	pending, err := s.driver.CountJobs(ctx, baqueue.JobFilter{CreatedFrom: &from})
 	if err != nil {
@@ -75,6 +82,22 @@ func (s *server) overview(ctx context.Context) (any, error) {
 }
 
 func (s *server) overviewHTTP(r *http.Request) (any, error) { return s.overview(r.Context()) }
+
+func (s *server) dynamicQueues(ctx context.Context) (map[string]*baqueue.DynamicQueueInfo, error) {
+	result := make(map[string]*baqueue.DynamicQueueInfo)
+	driver, ok := s.driver.(baqueue.DynamicQueueDriver)
+	if !ok {
+		return result, nil
+	}
+	definitions, err := driver.GetDynamicQueues(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range definitions {
+		result[definitions[i].Name] = &definitions[i]
+	}
+	return result, nil
+}
 
 func (s *server) statsHTTP(r *http.Request) (any, error) {
 	from, to, err := parseDates(r.URL.Query())
@@ -121,6 +144,10 @@ func (s *server) queuesHTTP(r *http.Request) (any, error) {
 
 func (s *server) queueHTTP(r *http.Request) (any, error) {
 	queue := r.PathValue("queue")
+	dynamic, err := s.dynamicQueues(r.Context())
+	if err != nil {
+		return nil, err
+	}
 	metrics, err := s.driver.GetMetrics(r.Context(), queue)
 	if err != nil {
 		return nil, err
@@ -133,7 +160,7 @@ func (s *server) queueHTTP(r *http.Request) (any, error) {
 	if m == nil {
 		m = map[string]any{}
 	}
-	return map[string]any{"name": queue, "size": size, "metrics": m}, nil
+	return map[string]any{"name": queue, "dynamic": dynamic[queue], "size": size, "metrics": m}, nil
 }
 
 type listJob struct {

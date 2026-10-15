@@ -72,3 +72,31 @@ The Python source repository was left unchanged. This verification does not
 include a module release or production deployment. Go handlers must cooperate with
 context cancellation; SQL storage uses the separate `baqueue_go_*` schema.
 The README documents Redis namespace sharing and the remaining runtime differences.
+
+## Dynamic Queue Verification, 2026-10-15
+
+The following checks cover the integrated dynamic queue implementation, including
+all four drivers, supervisor discovery/scaling, CLI configuration, and dashboard
+metadata/history totals:
+
+| Check | Environment | Result |
+| --- | --- | --- |
+| `go test ./... -count=1` | Windows, real Redis 7 and PostgreSQL 17 | Passed |
+| `go test -race ./... -count=1 -json` | Linux, Go 1.25, real Redis 7 and PostgreSQL 17 | 302 tests/subtests passed, 0 failed, 0 skipped; no races reported |
+| `go vet ./...` | Windows | Passed |
+| `go build ./...` | Windows | Passed |
+| `gofmt -l .` and `git diff --check` | Windows | Passed |
+| `go run ./examples/dynamic` | Windows, memory driver | 50 jobs completed; queue expired and records remained |
+
+Coverage includes atomic registration/enqueue and expiry, concurrent producers
+and cleanup, uncertain Redis EXEC outcomes without replay, SQL rollback and
+additive schema creation, delayed/backoff protection, retry reactivation with
+preserved policy/history, literal discovery prefixes, a zero-worker baseline,
+the physical worker cap including retiring workers, and retained dashboard totals.
+Machine-readable race results are in `artifacts/dynamic-race.jsonl` (Git-ignored).
+
+The Python counterpart also passed 455 tests with real Redis/PostgreSQL and a
+browser lifecycle check. These new results do not rerun or replace the earlier
+Redis interruption stress test or full Go browser checks documented above.
+Temporary services were stopped. These checks do not include a release tag,
+package publication, or production deployment.

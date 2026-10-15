@@ -27,11 +27,12 @@ type MemoryDriver struct {
 	batches     map[string]map[string]any
 	metrics     []memoryMetric
 	supervisors map[string]memorySupervisor
+	dynamic     map[string]DynamicQueueInfo
 }
 
 func NewMemoryDriver() *MemoryDriver {
 	return &MemoryDriver{jobs: map[string]*JobPayload{}, ready: map[string][]string{},
-		batches: map[string]map[string]any{}, supervisors: map[string]memorySupervisor{}}
+		batches: map[string]map[string]any{}, supervisors: map[string]memorySupervisor{}, dynamic: map[string]DynamicQueueInfo{}}
 }
 
 var _ Driver = (*MemoryDriver)(nil)
@@ -46,6 +47,10 @@ func (d *MemoryDriver) Push(ctx context.Context, p *JobPayload) (string, error) 
 	return ids[0], nil
 }
 func (d *MemoryDriver) PushMany(ctx context.Context, ps []*JobPayload) ([]string, error) {
+	return d.pushMany(ctx, ps, nil)
+}
+
+func (d *MemoryDriver) pushMany(ctx context.Context, ps []*JobPayload, definition *DynamicQueueInfo) ([]string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -63,6 +68,11 @@ func (d *MemoryDriver) PushMany(ctx context.Context, ps []*JobPayload) ([]string
 		}
 		seen[p.ID] = true
 	}
+	if definition != nil {
+		if _, err := d.registerDynamic(definition.Name, definition.IdleTimeoutSeconds); err != nil {
+			return nil, err
+		}
+	}
 	ids := make([]string, 0, len(ps))
 	for _, p := range ps {
 		p = p.Clone()
@@ -75,6 +85,12 @@ func (d *MemoryDriver) PushMany(ctx context.Context, ps []*JobPayload) ([]string
 	return ids, nil
 }
 func (d *MemoryDriver) enqueue(p *JobPayload) {
+	if p.Status == Pending {
+		if info, ok := d.dynamic[p.Queue]; ok {
+			info.Active, info.IdleSince = true, nil
+			d.dynamic[p.Queue] = info
+		}
+	}
 	d.removeReady(p.Queue, p.ID)
 	if p.Status == Pending && (p.DelayUntil == nil || *p.DelayUntil <= Now()) {
 		d.ready[p.Queue] = append(d.ready[p.Queue], p.ID)
@@ -336,7 +352,23 @@ func (d *MemoryDriver) Queues(ctx context.Context) ([]string, error) {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.queues(""), nil
+	names := map[string]bool{}
+	for _, name := range d.queues("") {
+		names[name] = true
+	}
+	for name, info := range d.dynamic {
+		if info.Active {
+			names[name] = true
+		} else {
+			delete(names, name)
+		}
+	}
+	out := make([]string, 0, len(names))
+	for name := range names {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 func (d *MemoryDriver) RecordMetric(ctx context.Context, q, m string, v float64) error {
 	if err := ctx.Err(); err != nil {
@@ -586,13 +618,120 @@ func (d *MemoryDriver) Flush(ctx context.Context, q string) error {
 	}
 	if q != "" {
 		delete(d.ready, q)
+		delete(d.dynamic, q)
 	} else {
+		clear(d.dynamic)
 		clear(d.ready)
 		clear(d.batches)
 		clear(d.supervisors)
 		d.metrics = nil
 	}
 	return nil
+}
+
+var _ DynamicQueueDriver = (*MemoryDriver)(nil)
+
+func (d *MemoryDriver) registerDynamic(name string, timeout float64) (DynamicQueueInfo, error) {
+	info, exists := d.dynamic[name]
+	busy := false
+	for _, p := range d.jobs {
+		if p.Queue == name {
+			if !exists {
+				return DynamicQueueInfo{}, fmt.Errorf("baqueue: ordinary queue %q already contains jobs", name)
+			}
+			busy = busy || p.Status == Pending || p.Status == Processing
+		}
+	}
+	now := Now()
+	if !exists {
+		info = newDynamicQueue(name, timeout, now)
+	} else if info.IdleTimeoutSeconds != timeout {
+		return DynamicQueueInfo{}, fmt.Errorf("baqueue: dynamic queue %q already has a different idle timeout", name)
+	}
+	info.Active, info.IdleSince = true, &now
+	if busy {
+		info.IdleSince = nil
+	}
+	d.dynamic[name] = info
+	return cloneDynamicQueue(info), nil
+}
+
+func (d *MemoryDriver) RegisterDynamicQueue(ctx context.Context, name string, timeout float64) (DynamicQueueInfo, error) {
+	if err := validateDynamicQueue(name, timeout); err != nil {
+		return DynamicQueueInfo{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return DynamicQueueInfo{}, err
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.registerDynamic(name, timeout)
+}
+
+func (d *MemoryDriver) PushDynamic(ctx context.Context, ps []*JobPayload, name string, timeout float64) ([]string, error) {
+	if err := validateDynamicQueue(name, timeout); err != nil {
+		return nil, err
+	}
+	for _, p := range ps {
+		if p == nil || p.Queue != name {
+			return nil, fmt.Errorf("baqueue: dynamic payload queue must match its definition")
+		}
+	}
+	return d.pushMany(ctx, ps, &DynamicQueueInfo{Name: name, IdleTimeoutSeconds: timeout})
+}
+
+func (d *MemoryDriver) GetDynamicQueues(ctx context.Context) ([]DynamicQueueInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out := []DynamicQueueInfo{}
+	for _, info := range d.dynamic {
+		if info.Active {
+			out = append(out, cloneDynamicQueue(info))
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+func (d *MemoryDriver) ExpireDynamicQueues(ctx context.Context) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	now := Now()
+	expired := []string{}
+	for name, info := range d.dynamic {
+		busy, retained := false, false
+		for _, p := range d.jobs {
+			if p.Queue == name {
+				retained = true
+				busy = busy || p.Status == Pending || p.Status == Processing
+			}
+		}
+		if busy {
+			info.Active, info.IdleSince = true, nil
+		} else if info.Active {
+			if info.IdleSince == nil {
+				at := now
+				info.IdleSince = &at
+			} else if now >= *info.IdleSince+info.IdleTimeoutSeconds {
+				info.Active = false
+				delete(d.ready, name)
+				expired = append(expired, name)
+			}
+		}
+		if !info.Active && !retained {
+			delete(d.dynamic, name)
+		} else {
+			d.dynamic[name] = info
+		}
+	}
+	sort.Strings(expired)
+	return expired, nil
 }
 func (d *MemoryDriver) PruneMetrics(ctx context.Context, age float64) (int, error) {
 	if err := ctx.Err(); err != nil {

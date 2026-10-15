@@ -36,7 +36,7 @@ func NewWorker(q *Queue, o WorkerOptions) *Worker {
 	if o.Name == "" {
 		o.Name = "worker-" + NewID()[:8]
 	}
-	if len(o.Queues) == 0 {
+	if o.Queues == nil {
 		o.Queues = []string{"default"}
 	}
 	o.Queues = append([]string{}, o.Queues...)
@@ -50,6 +50,13 @@ func NewWorker(q *Queue, o WorkerOptions) *Worker {
 }
 
 func (w *Worker) Stop() { w.stopOnce.Do(func() { close(w.stop) }) }
+
+// SetQueues replaces subscriptions without interrupting the current job.
+func (w *Worker) SetQueues(queues []string) {
+	w.mu.Lock()
+	w.options.Queues = append([]string{}, queues...)
+	w.mu.Unlock()
+}
 func (w *Worker) Stats() map[string]any {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
@@ -115,19 +122,25 @@ func (w *Worker) Run(ctx context.Context) error {
 
 // RunOnce claims and executes at most one job. Do not call concurrently on one worker.
 func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
-	for i := 0; i < len(w.options.Queues); i++ {
-		index := (w.cursor + i) % len(w.options.Queues)
-		p, err := w.queue.Driver.Pop(ctx, w.options.Queues[index])
+	w.mu.RLock()
+	queues := append([]string{}, w.options.Queues...)
+	w.mu.RUnlock()
+	if len(queues) == 0 {
+		return false, nil
+	}
+	for i := 0; i < len(queues); i++ {
+		index := (w.cursor + i) % len(queues)
+		p, err := w.queue.Driver.Pop(ctx, queues[index])
 		if err != nil {
 			return false, err
 		}
 		if p == nil {
 			continue
 		}
-		w.cursor = (index + 1) % len(w.options.Queues)
+		w.cursor = (index + 1) % len(queues)
 		return true, w.process(ctx, p)
 	}
-	w.cursor = (w.cursor + 1) % len(w.options.Queues)
+	w.cursor = (w.cursor + 1) % len(queues)
 	return false, nil
 }
 

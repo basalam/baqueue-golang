@@ -75,11 +75,98 @@ Implement `Handler` for a struct-based job. Optional `SuccessHandler` and
 Python's decorators and dynamic imports map to `RegisterFunc` and `Register` in Go;
 Python code itself cannot execute inside a Go worker.
 
+## Dynamic queues
+
+Use an open `Queue` to create a temporary queue. An empty name generates
+`dynamic-<uuid>`; omitting the optional timeout uses 30 seconds:
+
+```go
+temporary, err := q.CreateDynamicQueue(ctx, "")
+if err != nil { return err }
+fmt.Println(temporary.Name, temporary.IdleTimeoutSeconds)
+
+emails, err := q.CreateDynamicQueue(ctx, "tenant-42-emails", 30*time.Second)
+if err != nil { return err }
+id, err := emails.Push(ctx, "send_email", map[string]any{"to": "a@example.com"}, baqueue.WithMaxAttempts(3))
+if err != nil { return err }
+id, err = emails.Later(ctx, "send_email", time.Minute, map[string]any{"to": "b@example.com"})
+if err != nil { return err }
+ids, err := emails.Bulk(ctx, []baqueue.JobRequest{
+    {Name: "send_email", Data: map[string]any{"to": "c@example.com"}, Options: []baqueue.JobOption{baqueue.WithTags("newsletter")}},
+})
+if err != nil { return err }
+active, err := q.DynamicQueues(ctx)
+if err != nil { return err }
+```
+
+`Push`, `Later`, and `Bulk` use the same arguments and job options as `Queue`.
+The handle's name overrides `OnQueue` without changing registered job defaults.
+Dispatch atomically registers/reactivates the definition and enqueues its jobs,
+so the handle remains usable after expiry. Choose names distinct from ordinary
+queues and keep the same idle timeout when registering an existing name.
+
+`DynamicQueues` returns active `DynamicQueueInfo` records with JSON fields `name`,
+`idle_timeout_seconds`, `created_at`, `idle_since`, and `active`. Timestamps are Unix
+seconds; `idle_since` is null while jobs are pending or processing. All four
+built-in backends implement the optional `DynamicQueueDriver` interface.
+
+### Discovery and worker limits
+
+`DefaultSupervisorConfig()` discovers all explicitly registered dynamic queues
+with `DynamicQueuePrefixes: []string{""}`. A nil prefix slice also means discover
+all; an explicit `[]string{}` disables discovery. Nonempty prefixes such as
+`[]string{"tenant-", "request-"}` select matching names. Ordinary queues do not
+become dynamic merely because their names match a prefix.
+
+For a dynamic-only supervisor that can scale down to zero:
+
+```go
+sc := baqueue.DefaultSupervisorConfig()
+sc.Queues = []string{}
+sc.MinWorkers, sc.MaxWorkers = 0, 8
+sc.DynamicQueuePrefixes = []string{"tenant-"}
+sc.DynamicQueuePollSeconds = 1
+s := baqueue.NewSupervisor(q, sc)
+err = s.Run(ctx)
+```
+
+Keep `MaxWorkers >= 1`. Static and dynamic queues share one pool and one total
+`MaxWorkers` cap **per supervisor**, including workers still draining a job.
+`MinWorkers` remains the baseline; no queue gets a dedicated worker pool.
+Scaling changes internal worker goroutines, not processes, Kubernetes pods, or
+deployment replicas. Multiple supervisors each have their own cap, not a shared
+cluster-wide limit.
+
+`DynamicQueuePollSeconds` defaults to 1; a zero value in Go configuration falls
+back to 1. Positive intervals must be finite and representable as a Go duration.
+Keep a supervisor running for discovery and idle cleanup. Producers and the
+dashboard do not perform that lifecycle themselves.
+
+### Safe idle expiry
+
+With the default timeout, expiry requires at least 30 seconds of idleness from
+the first empty observation, plus polling lag. Creating or re-registering an
+empty definition starts a fresh idle window. Pending jobs, including delayed
+jobs and scheduled retries, and processing jobs prevent expiry.
+
+Expiry removes the active definition from discovery, not jobs, indexes, metrics,
+or history. An archived minimal policy stays with retained historical jobs so
+manual retry can reactivate the queue; cleanup removes that policy after its
+jobs are pruned. Normal retention and emergency cleanup remain independent of
+expiry, so an idle timeout does not extend job retention.
+
+Memory is single-process only. Redis dynamic metadata uses the same wire format
+in Python and Go, but neither runtime can execute the other's job classes or
+handlers. When intentionally sharing a Redis namespace, use runtime-specific
+queue prefixes and scope discovery accordingly; the default discovers all
+registered dynamic queues. Every consuming Go process must register its handlers.
+
 ## Feature parity
 
 | Python feature | Go API |
 | --- | --- |
 | Queue facade; push/later/bulk | `Queue`, `Push`, `Later`, `Bulk` |
+| Dynamic queues and active metadata | `CreateDynamicQueue`, `DynamicQueue.Push/Later/Bulk`, `DynamicQueues` |
 | Class/function jobs; success/failure hooks | `Handler`, `HandlerFunc`, registration and hook interfaces |
 | Memory, SQLite, Redis, PostgreSQL | `Driver` and four built-in constructors |
 | Fixed, linear, exponential, explicit retry delays | `Backoff`, `ComputeDelay`, `ShouldRetry` |
@@ -217,6 +304,13 @@ default. WebSockets accept same-origin requests unless explicitly configured.
 The original UI loads Alpine.js from jsDelivr and fonts from Google Fonts, so a
 browser needs access to those hosts.
 
+Active empty dynamic definitions appear in queue lists. Overview queue entries
+and queue-detail responses include a `dynamic` metadata record, or null when
+there is no active definition. Expired definitions disappear from active lists,
+but overview status totals still include retained historical jobs. Job details,
+queue-detail metrics, and manual retry remain available until normal retention
+removes the jobs.
+
 ## CLI and configuration
 
 ```sh
@@ -235,6 +329,22 @@ with `cli.Run(ctx, os.Args[1:], os.Stdout, register)` as in `examples/worker`.
 Configuration field names match Python; load partial JSON with `LoadConfig` to
 retain defaults. See [config.example.json](config.example.json). Driver URLs and
 credentials should come from application configuration, not source control.
+
+Dynamic discovery flags follow the existing config-file precedence: omitted
+flags preserve each supervisor's settings, while supplied flags override every
+configured supervisor. Repeated prefixes replace the configured list, not append
+to it. With no configuration, all registered dynamic queues are discovered every
+second:
+
+```sh
+go run ./examples/worker work -q emails --workers 3 --max-workers 10 --dynamic-queue-prefix tenant- --dynamic-queue-prefix request- --dynamic-queue-poll-seconds 0.5
+```
+
+`--dynamic-queue-poll-seconds` must be positive and finite; explicit CLI zero is
+rejected. To disable discovery, set `"dynamic_queue_prefixes": []` in the relevant
+`supervisors` JSON entries and omit `--dynamic-queue-prefix`. Omitted or null
+prefix settings discover all. Passing `--dynamic-queue-prefix=` explicitly
+restores discovery of all registered dynamic queues.
 
 `driver.options` supports Redis `username`, `password`, `db`, `max_connections`
 (`pool_size`), `socket_timeout`, `socket_connect_timeout`, `read_timeout`,

@@ -60,6 +60,10 @@ CREATE TABLE IF NOT EXISTS baqueue_go_supervisors (
  name TEXT PRIMARY KEY, data TEXT NOT NULL, heartbeat_at DOUBLE PRECISION NOT NULL
 );
 CREATE INDEX IF NOT EXISTS baqueue_go_supervisors_heartbeat ON baqueue_go_supervisors(heartbeat_at);
+CREATE TABLE IF NOT EXISTS baqueue_go_dynamic_queues (
+ name TEXT PRIMARY KEY, idle_timeout_seconds DOUBLE PRECISION NOT NULL,
+ created_at DOUBLE PRECISION NOT NULL, idle_since DOUBLE PRECISION, active BOOLEAN NOT NULL
+);
 `
 
 func (d *SQLDriver) Connect(ctx context.Context) error {
@@ -216,7 +220,17 @@ func (d *SQLDriver) sqlWrite(ctx context.Context, fn func(*sql.Tx) error) error 
 	if err != nil {
 		return err
 	}
-	return d.sqlRecover(ctx, db, func() error { return sqlTransaction(ctx, db, fn) })
+	return d.sqlRecover(ctx, db, func() error {
+		return sqlTransaction(ctx, db, func(tx *sql.Tx) error {
+			if d.postgres {
+				// Queue-lock waiters must observe work committed by the lock holder.
+				if _, err := tx.ExecContext(ctx, "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"); err != nil {
+					return err
+				}
+			}
+			return fn(tx)
+		})
+	})
 }
 
 func (d *SQLDriver) sqlLock(skip bool) string {
@@ -284,8 +298,14 @@ func (d *SQLDriver) Push(ctx context.Context, payload *JobPayload) (string, erro
 }
 
 func (d *SQLDriver) PushMany(ctx context.Context, payloads []*JobPayload) ([]string, error) {
+	return d.sqlPushMany(ctx, payloads, nil, 0)
+}
+
+func (d *SQLDriver) sqlPushMany(ctx context.Context, payloads []*JobPayload, dynamicName *string, timeout float64) ([]string, error) {
 	ids := make([]string, len(payloads))
 	arguments := make([][]any, len(payloads))
+	names := make([]string, 0)
+	seen := make(map[string]bool)
 	for i, p := range payloads {
 		if err := p.Validate(); err != nil {
 			return nil, err
@@ -295,8 +315,29 @@ func (d *SQLDriver) PushMany(ctx context.Context, payloads []*JobPayload) ([]str
 			return nil, err
 		}
 		ids[i], arguments[i] = p.ID, args
+		if !seen[p.Queue] {
+			seen[p.Queue] = true
+			names = append(names, p.Queue)
+		}
 	}
 	err := d.sqlWrite(ctx, func(tx *sql.Tx) error {
+		lockNames := names
+		if dynamicName != nil && len(names) == 0 {
+			lockNames = []string{*dynamicName}
+		}
+		if err := d.sqlLockDynamicQueues(ctx, tx, lockNames); err != nil {
+			return err
+		}
+		if dynamicName != nil {
+			if _, err := d.sqlRegisterDynamicQueue(ctx, tx, *dynamicName, timeout); err != nil {
+				return err
+			}
+		}
+		for _, name := range names {
+			if err := sqlTouchDynamicQueue(ctx, tx, name); err != nil {
+				return err
+			}
+		}
 		for _, args := range arguments {
 			_, err := tx.ExecContext(ctx, `INSERT INTO baqueue_go_jobs
  (id,queue,status,created_at,updated_at,delay_until,started_at,batch_id,payload)
@@ -344,9 +385,14 @@ func (d *SQLDriver) PopDelayed(ctx context.Context) ([]*JobPayload, error) {
 	var promoted []*JobPayload
 	err := d.sqlWrite(ctx, func(tx *sql.Tx) error {
 		now := Now()
-		rows, err := tx.QueryContext(ctx, `SELECT payload FROM baqueue_go_jobs
- WHERE status='pending' AND delay_until IS NOT NULL AND delay_until <= $1
- ORDER BY created_at,id`+d.sqlLock(true), now)
+		where, args, err := d.sqlLockMatchingQueues(ctx, tx,
+			"status='pending' AND delay_until IS NOT NULL AND delay_until <= $1", []any{now})
+		if err != nil {
+			return err
+		}
+		now = Now()
+		rows, err := tx.QueryContext(ctx, "SELECT payload FROM baqueue_go_jobs WHERE "+where+
+			" ORDER BY created_at,id"+d.sqlLock(true), args...)
 		if err != nil {
 			return err
 		}
@@ -355,6 +401,9 @@ func (d *SQLDriver) PopDelayed(ctx context.Context) ([]*JobPayload, error) {
 			return err
 		}
 		for _, p := range promoted {
+			if err = sqlTouchDynamicQueue(ctx, tx, p.Queue); err != nil {
+				return err
+			}
 			p.DelayUntil, p.UpdatedAt = nil, now
 			if err = sqlSaveJob(ctx, tx, p); err != nil {
 				return err
@@ -374,7 +423,7 @@ func (d *SQLDriver) sqlTransition(ctx context.Context, incoming *JobPayload, pro
 	}
 	var result *JobPayload
 	err := d.sqlWrite(ctx, func(tx *sql.Tx) error {
-		p, err := sqlScanJob(tx.QueryRowContext(ctx, "SELECT payload FROM baqueue_go_jobs WHERE id=$1"+d.sqlLock(false), incoming.ID))
+		p, err := d.sqlReadLockedJob(ctx, tx, incoming.ID)
 		if err != nil {
 			return err
 		}
@@ -408,6 +457,11 @@ func (d *SQLDriver) sqlTransition(ctx context.Context, incoming *JobPayload, pro
 			}
 		}
 		update(p)
+		if p.Status == Pending {
+			if err = sqlTouchDynamicQueue(ctx, tx, p.Queue); err != nil {
+				return err
+			}
+		}
 		if err = sqlSaveJob(ctx, tx, p); err != nil {
 			return err
 		}
@@ -470,13 +524,18 @@ func (d *SQLDriver) RequeueStuckJobs(ctx context.Context, seconds float64, queue
 	count := 0
 	err := d.sqlWrite(ctx, func(tx *sql.Tx) error {
 		now := Now()
-		query := "SELECT payload FROM baqueue_go_jobs WHERE status='processing' AND COALESCE(started_at,updated_at) <= $1"
+		where := "status='processing' AND COALESCE(started_at,updated_at) <= $1"
 		args := []any{now - seconds}
 		if queue != "" {
-			query += " AND queue=$2"
+			where += " AND queue=$2"
 			args = append(args, queue)
 		}
-		rows, err := tx.QueryContext(ctx, query+" ORDER BY id"+d.sqlLock(true), args...)
+		where, args, err := d.sqlLockMatchingQueues(ctx, tx, where, args)
+		if err != nil {
+			return err
+		}
+		now = Now()
+		rows, err := tx.QueryContext(ctx, "SELECT payload FROM baqueue_go_jobs WHERE "+where+" ORDER BY id"+d.sqlLock(true), args...)
 		if err != nil {
 			return err
 		}
@@ -485,6 +544,9 @@ func (d *SQLDriver) RequeueStuckJobs(ctx context.Context, seconds float64, queue
 			return err
 		}
 		for _, p := range jobs {
+			if err = sqlTouchDynamicQueue(ctx, tx, p.Queue); err != nil {
+				return err
+			}
 			p.Status, p.StartedAt, p.DelayUntil, p.UpdatedAt = Pending, nil, nil, now
 			if err = sqlSaveJob(ctx, tx, p); err != nil {
 				return err
@@ -508,8 +570,11 @@ func (d *SQLDriver) Promote(ctx context.Context, id string) (bool, error) {
 	promoted := false
 	err := d.sqlWrite(ctx, func(tx *sql.Tx) error {
 		promoted = false
-		p, err := sqlScanJob(tx.QueryRowContext(ctx, "SELECT payload FROM baqueue_go_jobs WHERE id=$1"+d.sqlLock(false), id))
+		p, err := d.sqlReadLockedJob(ctx, tx, id)
 		if err != nil || p == nil || p.Status != Pending {
+			return err
+		}
+		if err = sqlTouchDynamicQueue(ctx, tx, p.Queue); err != nil {
 			return err
 		}
 		p.DelayUntil, p.UpdatedAt = nil, Now()
@@ -606,7 +671,9 @@ func (d *SQLDriver) Queues(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.QueryContext(ctx, "SELECT DISTINCT queue FROM baqueue_go_jobs ORDER BY queue")
+	rows, err := db.QueryContext(ctx, `SELECT queue FROM baqueue_go_jobs j WHERE NOT EXISTS
+ (SELECT 1 FROM baqueue_go_dynamic_queues d WHERE d.name=j.queue AND NOT d.active)
+ UNION SELECT name AS queue FROM baqueue_go_dynamic_queues WHERE active ORDER BY queue`)
 	if err != nil {
 		return nil, err
 	}
@@ -966,10 +1033,21 @@ func (d *SQLDriver) ReconcilePendingJobs(ctx context.Context, _ int) (int, error
 func (d *SQLDriver) Flush(ctx context.Context, queue string) error {
 	return d.sqlWrite(ctx, func(tx *sql.Tx) error {
 		if queue != "" {
-			_, err := tx.ExecContext(ctx, "DELETE FROM baqueue_go_jobs WHERE queue=$1", queue)
+			if err := d.sqlLockDynamicQueues(ctx, tx, []string{queue}); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, "DELETE FROM baqueue_go_jobs WHERE queue=$1", queue); err != nil {
+				return err
+			}
+			_, err := tx.ExecContext(ctx, "DELETE FROM baqueue_go_dynamic_queues WHERE name=$1", queue)
 			return err
 		}
-		for _, table := range []string{"baqueue_go_jobs", "baqueue_go_batches", "baqueue_go_metrics", "baqueue_go_supervisors"} {
+		if d.postgres {
+			if _, err := tx.ExecContext(ctx, "LOCK TABLE baqueue_go_dynamic_queues IN SHARE ROW EXCLUSIVE MODE"); err != nil {
+				return err
+			}
+		}
+		for _, table := range []string{"baqueue_go_jobs", "baqueue_go_batches", "baqueue_go_metrics", "baqueue_go_supervisors", "baqueue_go_dynamic_queues"} {
 			if _, err := tx.ExecContext(ctx, "DELETE FROM "+table); err != nil {
 				return err
 			}

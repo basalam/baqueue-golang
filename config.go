@@ -30,11 +30,14 @@ type SupervisorConfig struct {
 	RecoverStuckJobs          bool     `json:"recover_stuck_jobs"`
 	StuckProcessingSeconds    float64  `json:"stuck_processing_seconds"`
 	StuckCheckIntervalSeconds float64  `json:"stuck_check_interval_seconds"`
+	DynamicQueuePrefixes      []string `json:"dynamic_queue_prefixes"`
+	DynamicQueuePollSeconds   float64  `json:"dynamic_queue_poll_seconds"`
 }
 
 func DefaultSupervisorConfig() SupervisorConfig {
 	return SupervisorConfig{Name: "default", Queues: []string{"default"}, Balance: "auto", MinWorkers: 1, MaxWorkers: 10,
-		Sleep: 1, Timeout: 60, MemoryLimit: 128, RecoverStuckJobs: true, StuckProcessingSeconds: 3600, StuckCheckIntervalSeconds: 60}
+		Sleep: 1, Timeout: 60, MemoryLimit: 128, RecoverStuckJobs: true, StuckProcessingSeconds: 3600, StuckCheckIntervalSeconds: 60,
+		DynamicQueuePrefixes: []string{""}, DynamicQueuePollSeconds: 1}
 }
 func (c *SupervisorConfig) UnmarshalJSON(b []byte) error {
 	type plain SupervisorConfig
@@ -115,7 +118,7 @@ func (c Config) Validate() error {
 	return nil
 }
 func (c SupervisorConfig) Validate() error {
-	if c.Name == "" || len(c.Queues) == 0 || c.MinWorkers < 1 || c.MaxWorkers < c.MinWorkers || !validSeconds(c.Sleep, false) || !validSeconds(c.Timeout, false) || c.MaxJobsPerWorker < 0 || !validSeconds(c.MaxTime, true) {
+	if c.Name == "" || c.MinWorkers < 0 || c.MaxWorkers < 1 || c.MaxWorkers < c.MinWorkers || !validSeconds(c.Sleep, false) || !validSeconds(c.Timeout, false) || c.MaxJobsPerWorker < 0 || !validSeconds(c.MaxTime, true) || !validSeconds(c.DynamicQueuePollSeconds, true) {
 		return fmt.Errorf("baqueue: invalid supervisor configuration")
 	}
 	for _, q := range c.Queues {

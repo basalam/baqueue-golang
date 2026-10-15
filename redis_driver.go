@@ -269,13 +269,15 @@ func (d *RedisDriver) removeIndexes(plan *redisPlan, id, queue string) {
 	}
 }
 
-func (d *RedisDriver) save(plan *redisPlan, job *JobPayload) error {
+func (d *RedisDriver) save(ctx context.Context, tx *redis.Tx, plan *redisPlan, job *JobPayload) error {
 	raw, err := json.Marshal(job)
 	if err != nil {
 		return err
 	}
+	if err = d.saveQueueMembership(ctx, tx, plan, job.Queue, job.Status == Pending || job.Status == Processing); err != nil {
+		return err
+	}
 	plan.add("HSET", d.key("job", job.ID), "data", string(raw))
-	plan.add("SADD", d.key("queues"), job.Queue)
 	d.removeIndexes(plan, job.ID, job.Queue)
 	d.addIndexes(plan, job)
 	return nil
@@ -325,8 +327,12 @@ func (d *RedisDriver) Push(ctx context.Context, payload *JobPayload) (string, er
 }
 
 func (d *RedisDriver) PushMany(ctx context.Context, payloads []*JobPayload) ([]string, error) {
+	return d.pushMany(ctx, payloads, nil)
+}
+
+func (d *RedisDriver) pushMany(ctx context.Context, payloads []*JobPayload, dynamic *DynamicQueueInfo) ([]string, error) {
 	ids := make([]string, 0, len(payloads))
-	if len(payloads) == 0 {
+	if len(payloads) == 0 && dynamic == nil {
 		return ids, ctx.Err()
 	}
 	jobs := make([]*JobPayload, 0, len(payloads))
@@ -349,9 +355,12 @@ func (d *RedisDriver) PushMany(ctx context.Context, payloads []*JobPayload) ([]s
 		ids = append(ids, job.ID)
 		keys = append(keys, d.key("job", job.ID))
 	}
+	if dynamic != nil {
+		keys = append(keys, d.dynamicKeys(dynamic.Name)...)
+	}
 	err := d.watch(ctx, keys, func(tx *redis.Tx) error {
-		for _, key := range keys {
-			n, err := tx.Exists(ctx, key).Result()
+		for _, job := range jobs {
+			n, err := tx.Exists(ctx, d.key("job", job.ID)).Result()
 			if err != nil {
 				return err
 			}
@@ -360,8 +369,20 @@ func (d *RedisDriver) PushMany(ctx context.Context, payloads []*JobPayload) ([]s
 			}
 		}
 		plan := &redisPlan{}
+		if dynamic != nil {
+			info, err := d.registeredDynamicQueue(ctx, tx, dynamic.Name, dynamic.IdleTimeoutSeconds)
+			if err != nil {
+				return err
+			}
+			if len(jobs) != 0 {
+				info.IdleSince = nil
+			}
+			if err = d.storeDynamicQueue(plan, info); err != nil {
+				return err
+			}
+		}
 		for _, job := range jobs {
-			if err := d.save(plan, job); err != nil {
+			if err := d.save(ctx, tx, plan, job); err != nil {
 				return err
 			}
 			d.ready(plan, job)
@@ -432,7 +453,7 @@ func (d *RedisDriver) Pop(ctx context.Context, queue string) (*JobPayload, error
 			}
 			// Keep status persistence ahead of destructive membership changes.
 			saved := &redisPlan{}
-			if err = d.save(saved, job); err != nil {
+			if err = d.save(ctx, tx, saved, job); err != nil {
 				return err
 			}
 			saved.commands = append(saved.commands, plan.commands...)
@@ -487,7 +508,7 @@ func (d *RedisDriver) transition(ctx context.Context, incoming *JobPayload, stat
 			}
 		}
 		plan := &redisPlan{}
-		if err = d.save(plan, job); err != nil {
+		if err = d.save(ctx, tx, plan, job); err != nil {
 			return err
 		}
 		if job.BatchID != nil && (status == Completed || status == Failed) {
@@ -561,6 +582,9 @@ func (d *RedisDriver) promote(ctx context.Context, id string, force bool, now fl
 			plan.add("ZREM", d.key("delayed"), id)
 			return plan.commit(ctx, tx)
 		}
+		if err = d.saveQueueMembership(ctx, tx, plan, job.Queue, true); err != nil {
+			return err
+		}
 		if force && job.DelayUntil == nil {
 			queueKey := d.key("queue", job.Queue)
 			if err = tx.Watch(ctx, queueKey).Err(); err != nil {
@@ -579,7 +603,7 @@ func (d *RedisDriver) promote(ctx context.Context, id string, force bool, now fl
 			}
 		}
 		job.DelayUntil, job.UpdatedAt = nil, now
-		if err = d.save(plan, job); err != nil {
+		if err = d.save(ctx, tx, plan, job); err != nil {
 			return err
 		}
 		d.ready(plan, job)
@@ -639,7 +663,7 @@ func (d *RedisDriver) RequeueStuckJobs(ctx context.Context, age float64, queue s
 			}
 			job.Status, job.StartedAt, job.DelayUntil, job.UpdatedAt = Pending, nil, nil, Now()
 			plan := &redisPlan{}
-			if err = d.save(plan, job); err != nil {
+			if err = d.save(ctx, tx, plan, job); err != nil {
 				return err
 			}
 			d.ready(plan, job)
@@ -722,9 +746,21 @@ func (d *RedisDriver) Size(ctx context.Context, queue string) (int, error) {
 }
 
 func (d *RedisDriver) Queues(ctx context.Context) ([]string, error) {
-	queues, err := d.client().SMembers(ctx, d.key("queues")).Result()
-	sort.Strings(queues)
-	return queues, err
+	names, err := d.allQueueNames(ctx)
+	if err != nil {
+		return nil, err
+	}
+	queues := make([]string, 0, len(names))
+	for _, name := range names {
+		info, err := d.readDynamicQueue(ctx, d.client(), name)
+		if err != nil {
+			return nil, err
+		}
+		if info == nil || info.Active {
+			queues = append(queues, name)
+		}
+	}
+	return queues, nil
 }
 
 type redisMetric struct {
@@ -751,7 +787,7 @@ func (d *RedisDriver) GetMetrics(ctx context.Context, queue string) (map[string]
 	queues := []string{queue}
 	if queue == "" {
 		var err error
-		queues, err = d.Queues(ctx)
+		queues, err = d.allQueueNames(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -1200,8 +1236,10 @@ func (d *RedisDriver) ReconcileIndexes(ctx context.Context, batch int) (int, err
 				return err
 			}
 			plan := &redisPlan{}
+			if err = d.saveQueueMembership(ctx, tx, plan, job.Queue, job.Status == Pending || job.Status == Processing); err != nil {
+				return err
+			}
 			d.addIndexes(plan, job)
-			plan.add("SADD", d.key("queues"), job.Queue)
 			return plan.commit(ctx, tx)
 		})
 		if err != nil {
@@ -1304,7 +1342,7 @@ func (d *RedisDriver) ReconcilePendingJobs(ctx context.Context, batch int) (int,
 			} else {
 				d.ready(plan, job)
 			}
-			if err = d.save(plan, job); err != nil {
+			if err = d.save(ctx, tx, plan, job); err != nil {
 				return err
 			}
 			return plan.commit(ctx, tx)
@@ -1367,14 +1405,14 @@ func (d *RedisDriver) Flush(ctx context.Context, queue string) error {
 	}
 	queues := []string{queue}
 	if queue == "" {
-		queues, err = d.Queues(ctx)
+		queues, err = d.allQueueNames(ctx)
 		if err != nil {
 			return err
 		}
 	}
 	for _, name := range queues {
 		index, list := d.index(name, ""), d.key("queue", name)
-		err = d.watch(ctx, []string{index, list}, func(tx *redis.Tx) error {
+		err = d.watch(ctx, d.dynamicKeys(name), func(tx *redis.Tx) error {
 			n, err := tx.ZCard(ctx, index).Result()
 			if err != nil || n != 0 {
 				return err
@@ -1385,6 +1423,8 @@ func (d *RedisDriver) Flush(ctx context.Context, queue string) error {
 			}
 			plan := &redisPlan{}
 			plan.add("SREM", d.key("queues"), name)
+			plan.add("DEL", d.dynamicKey(name))
+			plan.add("SREM", d.key("dynamic_queues"), name)
 			return plan.commit(ctx, tx)
 		})
 		if err != nil {

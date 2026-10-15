@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 )
@@ -85,10 +86,17 @@ type Supervisor struct {
 	running  bool
 	serial   int
 	desired  int
+	queues   []string
 }
 
 func NewSupervisor(q *Queue, c SupervisorConfig) *Supervisor {
-	return &Supervisor{Queue: q, Config: c, Balancer: CreateBalancer(c.Balance, c.MinWorkers, c.MaxWorkers)}
+	if c.DynamicQueuePrefixes == nil {
+		c.DynamicQueuePrefixes = []string{""}
+	}
+	if c.DynamicQueuePollSeconds == 0 {
+		c.DynamicQueuePollSeconds = 1
+	}
+	return &Supervisor{Queue: q, Config: c, Balancer: CreateBalancer(c.Balance, c.MinWorkers, c.MaxWorkers), queues: append([]string{}, c.Queues...)}
 }
 func (s *Supervisor) Stats() map[string]any {
 	s.mu.Lock()
@@ -97,11 +105,11 @@ func (s *Supervisor) Stats() map[string]any {
 	for _, w := range s.workers {
 		ws = append(ws, w.worker.Stats())
 	}
-	return map[string]any{"name": s.Config.Name, "queues": append([]string{}, s.Config.Queues...), "balance": s.Config.Balance, "workers": len(ws), "running": s.running, "worker_stats": ws}
+	return map[string]any{"name": s.Config.Name, "queues": append([]string{}, s.queues...), "balance": s.Config.Balance, "workers": len(ws), "running": s.running, "worker_stats": ws}
 }
 func (s *Supervisor) spawn() {
 	s.serial++
-	w := NewWorker(s.Queue, WorkerOptions{Name: fmt.Sprintf("%s-worker-%d", s.Config.Name, s.serial), Queues: s.Config.Queues, Sleep: time.Duration(s.Config.Sleep * float64(time.Second)), Timeout: time.Duration(s.Config.Timeout * float64(time.Second)), MaxJobs: s.Config.MaxJobsPerWorker, MaxTime: time.Duration(s.Config.MaxTime * float64(time.Second))})
+	w := NewWorker(s.Queue, WorkerOptions{Name: fmt.Sprintf("%s-worker-%d", s.Config.Name, s.serial), Queues: append([]string{}, s.queues...), Sleep: time.Duration(s.Config.Sleep * float64(time.Second)), Timeout: time.Duration(s.Config.Timeout * float64(time.Second)), MaxJobs: s.Config.MaxJobsPerWorker, MaxTime: time.Duration(s.Config.MaxTime * float64(time.Second))})
 	entry := &supervisorWorker{worker: w, done: make(chan struct{})}
 	s.workers = append(s.workers, entry)
 	go func() {
@@ -165,12 +173,68 @@ func (s *Supervisor) report(ctx context.Context) {
 		slog.Warn("baqueue supervisor heartbeat failed", "error", err)
 	}
 }
+
+func (s *Supervisor) queueSnapshot() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string{}, s.queues...)
+}
+
+func (s *Supervisor) refreshDynamicQueues(ctx context.Context) error {
+	driver, ok := s.Queue.Driver.(DynamicQueueDriver)
+	if !ok {
+		return nil
+	}
+	if _, err := driver.ExpireDynamicQueues(ctx); err != nil {
+		return err
+	}
+	definitions, err := driver.GetDynamicQueues(ctx)
+	if err != nil {
+		return err
+	}
+	queues := append([]string{}, s.Config.Queues...)
+	seen := map[string]bool{}
+	for _, name := range queues {
+		seen[name] = true
+	}
+	for _, info := range definitions {
+		for _, prefix := range s.Config.DynamicQueuePrefixes {
+			if strings.HasPrefix(info.Name, prefix) && !seen[info.Name] {
+				queues = append(queues, info.Name)
+				seen[info.Name] = true
+				break
+			}
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.queues = queues
+	for _, entry := range s.workers {
+		entry.worker.SetQueues(queues)
+	}
+	return nil
+}
+
+func (s *Supervisor) balance(ctx context.Context) {
+	s.mu.Lock()
+	count := len(s.workers)
+	s.mu.Unlock()
+	if s.Balancer == nil {
+		return
+	}
+	desired, err := s.Balancer.Recommend(ctx, s.Queue.Driver, s.queueSnapshot(), count)
+	if err == nil {
+		s.Scale(desired)
+	} else if ctx.Err() == nil {
+		slog.Warn("baqueue balancing failed", "error", err)
+	}
+}
 func (s *Supervisor) recover(ctx context.Context) {
 	if !s.Config.RecoverStuckJobs {
 		return
 	}
 	seen := map[string]bool{}
-	for _, q := range s.Config.Queues {
+	for _, q := range s.queueSnapshot() {
 		if seen[q] {
 			continue
 		}
@@ -193,6 +257,9 @@ func (s *Supervisor) Run(ctx context.Context) error {
 	s.ctx = ctx
 	s.mu.Unlock()
 	s.Queue.Events.Emit(ctx, "supervisor.started", map[string]any{"supervisor": s.Config.Name})
+	if err := s.refreshDynamicQueues(ctx); err != nil && ctx.Err() == nil {
+		slog.Warn("baqueue initial dynamic discovery failed", "error", err)
+	}
 	s.Scale(s.Config.MinWorkers)
 	auxCtx, cancel := context.WithCancel(ctx)
 	var wg sync.WaitGroup
@@ -231,6 +298,8 @@ func (s *Supervisor) Run(ctx context.Context) error {
 	defer heartbeat.Stop()
 	balance := time.NewTicker(5 * time.Second)
 	defer balance.Stop()
+	dynamic := time.NewTicker(time.Duration(s.Config.DynamicQueuePollSeconds * float64(time.Second)))
+	defer dynamic.Stop()
 	stuck := time.NewTicker(time.Duration(max(1, s.Config.StuckCheckIntervalSeconds) * float64(time.Second)))
 	defer stuck.Stop()
 	s.recover(ctx)
@@ -239,6 +308,12 @@ func (s *Supervisor) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-dynamic.C:
+			if err := s.refreshDynamicQueues(ctx); err != nil && ctx.Err() == nil {
+				slog.Warn("baqueue dynamic queue maintenance failed", "error", err)
+			}
+			s.reap()
+			s.balance(ctx)
 		case <-heartbeat.C:
 			s.reap()
 			if _, err := s.Queue.ReconcileBatches(ctx, 100); err != nil && ctx.Err() == nil {
@@ -251,17 +326,7 @@ func (s *Supervisor) Run(ctx context.Context) error {
 		case <-stuck.C:
 			s.recover(ctx)
 		case <-balance.C:
-			s.mu.Lock()
-			count := len(s.workers)
-			s.mu.Unlock()
-			if s.Balancer != nil {
-				desired, err := s.Balancer.Recommend(ctx, s.Queue.Driver, s.Config.Queues, count)
-				if err == nil {
-					s.Scale(desired)
-				} else if ctx.Err() == nil {
-					slog.Warn("baqueue balancing failed", "error", err)
-				}
-			}
+			s.balance(ctx)
 			// Goroutines share a heap: memory pressure triggers GC, not per-worker termination.
 			if s.Config.MemoryLimit > 0 {
 				var m runtime.MemStats

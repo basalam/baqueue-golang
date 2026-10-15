@@ -69,6 +69,9 @@ func Run(ctx context.Context, args []string, out io.Writer, register RegisterFun
 	flags.StringVar(&config.Prefix, "prefix", config.Prefix, "Redis namespace")
 	var queues stringsFlag
 	flags.Var(&queues, "q", "queue name; repeat for multiple queues")
+	var dynamicPrefixes stringsFlag
+	flags.Var(&dynamicPrefixes, "dynamic-queue-prefix", "discover registered dynamic queues by prefix; repeatable, defaults to all unless configured")
+	dynamicPoll := flags.Float64("dynamic-queue-poll-seconds", 1, "dynamic queue discovery/cleanup interval in positive finite seconds; overrides configuration when supplied")
 	queue := flags.String("queue", "", "queue filter")
 	status := flags.String("status", "", "job status")
 	tag := flags.String("tag", "", "job tag")
@@ -96,6 +99,9 @@ func Run(ctx context.Context, args []string, out io.Writer, register RegisterFun
 	}
 	if flags.NArg() != 0 {
 		return fmt.Errorf("unexpected arguments: %v", flags.Args())
+	}
+	if *dynamicPoll <= 0 || math.IsNaN(*dynamicPoll) || math.IsInf(*dynamicPoll, 0) {
+		return errors.New("--dynamic-queue-poll-seconds must be positive and finite")
 	}
 	for _, numeric := range []struct {
 		name  string
@@ -134,6 +140,12 @@ func Run(ctx context.Context, args []string, out io.Writer, register RegisterFun
 		s := &config.Supervisors[i]
 		if len(queues) > 0 {
 			s.Queues = queues
+		}
+		if visited["dynamic-queue-prefix"] {
+			s.DynamicQueuePrefixes = append([]string{}, dynamicPrefixes...)
+		}
+		if visited["dynamic-queue-poll-seconds"] {
+			s.DynamicQueuePollSeconds = *dynamicPoll
 		}
 		if visited["workers"] {
 			s.MinWorkers = *workers
